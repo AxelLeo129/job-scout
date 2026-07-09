@@ -1,0 +1,64 @@
+# Corre JobScout una vez al día en GitHub Actions (gratis) y commitea la base
+# de ofertas vistas (seen_offers.db) de vuelta al repo para persistir el estado.
+#
+# Secrets requeridos (Settings → Secrets and variables → Actions):
+#   ANTHROPIC_API_KEY   — clave de la API de Anthropic
+#   TELEGRAM_BOT_TOKEN  — token del bot de Telegram
+#   TELEGRAM_CHAT_ID    — chat ID a donde notificar
+#   CV_TEXT             — el contenido completo de tu cv.txt
+
+name: JobScout diario
+
+on:
+  schedule:
+    # 13:00 UTC = 07:00 Guatemala (UTC-6), todos los días.
+    - cron: "0 13 * * *"
+  workflow_dispatch: # permite lanzarlo a mano desde la pestaña Actions
+
+permissions:
+  contents: write # para poder commitear seen_offers.db
+
+concurrency:
+  group: jobscout
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Escribir CV desde el secret
+        run: printf '%s' "$CV_TEXT" > cv.txt
+        env:
+          CV_TEXT: ${{ secrets.CV_TEXT }}
+
+      - name: Ejecutar JobScout
+        run: python main.py
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Commitear ofertas vistas
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add seen_offers.db
+          if git diff --cached --quiet; then
+            echo "Sin ofertas nuevas; nada que commitear."
+          else
+            git commit -m "chore: actualizar ofertas vistas"
+            git pull --rebase origin main
+            git push
+          fi

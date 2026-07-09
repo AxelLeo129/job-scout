@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Variables de entorno y secretos
+.env
+
+# Datos de ejecución
+# (seen_offers.db SÍ se versiona: es el estado que GitHub Actions
+#  commitea de vuelta tras cada corrida diaria)
+seen_offers.json*
+debug_*.html
+
+# Datos personales
+cv.txt
+
+# IDE / editor
+.vscode/
+.idea/
+
+# Claude Code (config local)
+.claude/settings.local.json
+
+# Sistema operativo
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
