@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import unicodedata
 
 from dotenv import load_dotenv
 
@@ -62,6 +63,33 @@ def deduplicate(offers: list[JobOffer]) -> list[JobOffer]:
     return unique
 
 
+def _normalize(text: str) -> str:
+    """Pasa a minúsculas y quita acentos, para comparar términos sin tildes."""
+    nfkd = unicodedata.normalize("NFKD", text.lower())
+    return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+
+
+def filter_excluded(offers: list[JobOffer]) -> list[JobOffer]:
+    """Descarta ofertas cuya empresa, título o descripción contenga algún
+    término de config.EXCLUDE_TERMS (comparación sin mayúsculas ni acentos)."""
+    terms = [_normalize(t) for t in config.EXCLUDE_TERMS]
+    if not terms:
+        return offers
+
+    kept: list[JobOffer] = []
+    dropped = 0
+    for offer in offers:
+        haystack = _normalize(f"{offer.company} {offer.title} {offer.description}")
+        if any(term in haystack for term in terms):
+            dropped += 1
+            continue
+        kept.append(offer)
+
+    if dropped:
+        print(f"🚫 {dropped} ofertas descartadas por términos excluidos.")
+    return kept
+
+
 def load_cv() -> str:
     """Carga el texto del CV desde el archivo configurado."""
     if not os.path.exists(config.CV_PATH):
@@ -88,7 +116,10 @@ def main() -> None:
     offers = deduplicate(collect_offers(debug=args.debug))
     print(f"\n📦 {len(offers)} ofertas únicas en total.")
 
-    # 2. Filtrar las ya vistas.
+    # 2. Descartar sectores/empresas vetados (banca, Genesis Empresarial, etc.).
+    offers = filter_excluded(offers)
+
+    # 3. Filtrar las ya vistas.
     store = SeenStore(config.SEEN_DB_PATH, legacy_json_path=config.LEGACY_SEEN_JSON_PATH)
     new_offers = [o for o in offers if store.is_new(o.fingerprint)]
     print(f"🆕 {len(new_offers)} ofertas nuevas (no vistas antes).")
@@ -97,15 +128,19 @@ def main() -> None:
         print("Nada nuevo que evaluar. ¡Hasta la próxima!")
         return
 
-    # 3. Puntuar con IA.
+    # 4. Puntuar con IA.
     print(f"\n🤖 Puntuando {len(new_offers)} ofertas con {config.RANKING_MODEL}...")
-    ranker = Ranker(cv_text=load_cv(), model=config.RANKING_MODEL)
+    ranker = Ranker(
+        cv_text=load_cv(),
+        model=config.RANKING_MODEL,
+        preferred_modalities=config.PREFERRED_MODALITIES,
+    )
     ranker.rank_all(new_offers)
 
     # Ordenar de mayor a menor puntaje.
     new_offers.sort(key=lambda o: o.score, reverse=True)
 
-    # 4. Notificar las que superen el umbral.
+    # 5. Notificar las que superen el umbral.
     to_notify = [o for o in new_offers if o.score >= config.MIN_SCORE_TO_NOTIFY]
     print(f"\n📨 {len(to_notify)} ofertas superan el umbral ({config.MIN_SCORE_TO_NOTIFY}).")
 
@@ -126,7 +161,7 @@ def main() -> None:
             except Exception as exc:  # noqa: BLE001
                 print(f"    ⚠️  Error enviando a Telegram: {exc}")
 
-    # 5. Marcar como vistas TODAS las nuevas (incluso las que no se notificaron,
+    # 6. Marcar como vistas TODAS las nuevas (incluso las que no se notificaron,
     #    para no re-evaluarlas y gastar tokens en cada ejecución).
     for offer in new_offers:
         store.mark(offer, notified=offer.fingerprint in sent)

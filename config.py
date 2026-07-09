@@ -32,6 +32,24 @@ ENABLED_SCRAPERS = [
 # Cuántas páginas de resultados recorrer por palabra clave (≈20 ofertas por página).
 MAX_PAGES_PER_KEYWORD = 2
 
+# Exclusiones DURAS: si la empresa, el título o la descripción de una oferta
+# contiene alguno de estos términos (sin importar mayúsculas/acentos), la
+# oferta se descarta antes del ranking (no se evalúa ni se notifica). Útil
+# para vetar sectores o empresas que no te interesan.
+EXCLUDE_TERMS = [
+    "banca",
+    "banco",
+    "bancari",  # cubre "bancario", "bancaria"
+    "genesis empresarial",
+]
+
+# Modalidades a PRIORIZAR en el ranking: la IA les sube el puntaje. No
+# descarta las demás (presenciales), solo favorece estas.
+PREFERRED_MODALITIES = [
+    "remoto",
+    "híbrido",
+]
+
 # Puntaje mínimo (0-100) para que una oferta se notifique por Telegram.
 # Subir este número = menos ofertas pero más relevantes.
 MIN_SCORE_TO_NOTIFY = 60

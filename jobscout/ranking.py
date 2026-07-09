@@ -31,10 +31,24 @@ Responde siempre en español."""
 class Ranker:
     """Puntúa ofertas comparándolas con un CV mediante Claude."""
 
-    def __init__(self, cv_text: str, model: str):
+    def __init__(self, cv_text: str, model: str, preferred_modalities: list[str] | None = None):
         self.cv_text = cv_text
         self.model = model
+        self.preferred_modalities = preferred_modalities or []
         self.client = anthropic.Anthropic()  # lee ANTHROPIC_API_KEY del entorno
+
+    @property
+    def system_prompt(self) -> str:
+        """Prompt de sistema, con la preferencia de modalidad si aplica."""
+        if not self.preferred_modalities:
+            return SYSTEM_PROMPT
+        modalidades = " o ".join(self.preferred_modalities)
+        return (
+            SYSTEM_PROMPT
+            + f" IMPORTANTE: el candidato prefiere trabajo {modalidades}; "
+            "sube el puntaje a las ofertas con esa modalidad y baja el de las "
+            "presenciales, pero sin descartarlas del todo si encajan muy bien."
+        )
 
     def rank(self, offer: JobOffer) -> RankResult:
         """Devuelve el puntaje y la razón para una oferta."""
@@ -52,7 +66,7 @@ class Ranker:
         response = self.client.messages.parse(
             model=self.model,
             max_tokens=512,
-            system=SYSTEM_PROMPT,
+            system=self.system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
             output_format=RankResult,
         )
