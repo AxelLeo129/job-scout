@@ -72,14 +72,21 @@ class Ranker:
         )
         return response.parsed_output
 
-    def rank_all(self, offers: list[JobOffer]) -> None:
-        """Puntúa una lista de ofertas, escribiendo score y razón en cada una."""
+    def rank_all(self, offers: list[JobOffer]) -> list[JobOffer]:
+        """Puntúa una lista de ofertas, escribiendo score y razón en cada una.
+
+        Devuelve solo las que se pudieron puntuar; las que fallan (sin saldo,
+        límite de peticiones, caída de la API) quedan fuera para que se
+        reintenten en la próxima ejecución.
+        """
+        ranked: list[JobOffer] = []
         for offer in offers:
             try:
                 result = self.rank(offer)
-                offer.score = result.score
-                offer.score_reason = result.reason
             except Exception as exc:  # noqa: BLE001 - una oferta no debe romper todo
                 print(f"  [ranking] Error puntuando '{offer.title}': {exc}")
-                offer.score = 0
-                offer.score_reason = "No se pudo evaluar."
+                continue
+            offer.score = max(0, min(100, result.score))
+            offer.score_reason = result.reason
+            ranked.append(offer)
+        return ranked

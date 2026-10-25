@@ -17,7 +17,7 @@ from urllib.parse import quote, urljoin
 
 from bs4 import BeautifulSoup
 
-from ..models import JobOffer
+from ..models import JobOffer, canonical_url
 from .base import BaseScraper
 
 
@@ -95,7 +95,7 @@ class ComputrabajoScraper(BaseScraper):
             return None
 
         title = link.get_text(strip=True)
-        url = urljoin(self.base_url, link["href"])
+        url = canonical_url(urljoin(self.base_url, link["href"]))
 
         # Empresa: suele ser un enlace o párrafo con la clase de empresa.
         company_el = (

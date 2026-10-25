@@ -9,6 +9,22 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from urllib.parse import urldefrag
+
+
+def canonical_url(url: str) -> str:
+    """Quita el fragmento (#...) de una URL.
+
+    Computrabajo añade anclas de seguimiento como "#lc=ListOffers-Score3-6"
+    que cambian según la posición de la oferta en el listado; sin quitarlas,
+    la misma oferta tendría una huella distinta cada día.
+    """
+    return urldefrag(url).url
+
+
+def fingerprint_url(url: str) -> str:
+    """Huella de 16 caracteres de una URL canónica."""
+    return hashlib.sha256(canonical_url(url).encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass
@@ -36,7 +52,7 @@ class JobOffer:
 
         Se basa en la URL porque es lo más estable entre ejecuciones.
         """
-        return hashlib.sha256(self.url.encode("utf-8")).hexdigest()[:16]
+        return fingerprint_url(self.url)
 
     def to_dict(self) -> dict:
         """Serializa la oferta a un diccionario (para guardar en JSON)."""

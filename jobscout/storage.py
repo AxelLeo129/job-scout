@@ -16,7 +16,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 
-from .models import JobOffer
+from .models import JobOffer, canonical_url, fingerprint_url
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS seen_offers (
@@ -49,6 +49,7 @@ class SeenStore:
         self._conn.commit()
         if legacy_json_path:
             self._migrate_legacy_json(legacy_json_path)
+        self._canonicalize_urls()
         self._seen: set[str] = {
             row[0] for row in self._conn.execute("SELECT fingerprint FROM seen_offers")
         }
@@ -71,6 +72,39 @@ class SeenStore:
         os.replace(json_path, json_path + ".migrated")
         print(f"📦 Migradas {len(fingerprints)} huellas de '{json_path}' a '{self.path}'.")
 
+    def _canonicalize_urls(self) -> None:
+        """Fusiona las filas guardadas con URL con fragmento (#...).
+
+        Antes la huella incluía el fragmento, así que la misma oferta de
+        Computrabajo quedó guardada varias veces. Se deja una fila por URL
+        canónica, con la fecha más antigua y notified=1 si alguna lo tenía.
+        """
+        rows = self._conn.execute(
+            "SELECT fingerprint, url, notified, first_seen_at FROM seen_offers "
+            "WHERE url LIKE '%#%' ORDER BY first_seen_at"
+        ).fetchall()
+        if not rows:
+            return
+        for old_fp, url, notified, first_seen_at in rows:
+            new_fp = fingerprint_url(url)
+            existing = self._conn.execute(
+                "SELECT notified, first_seen_at FROM seen_offers WHERE fingerprint = ?",
+                (new_fp,),
+            ).fetchone()
+            if existing is None:
+                self._conn.execute(
+                    "UPDATE seen_offers SET fingerprint = ?, url = ? WHERE fingerprint = ?",
+                    (new_fp, canonical_url(url), old_fp),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE seen_offers SET notified = ?, first_seen_at = ? WHERE fingerprint = ?",
+                    (max(notified, existing[0]), min(first_seen_at, existing[1]), new_fp),
+                )
+                self._conn.execute("DELETE FROM seen_offers WHERE fingerprint = ?", (old_fp,))
+        self._conn.commit()
+        print(f"🧹 Normalizadas {len(rows)} URLs con fragmento en '{self.path}'.")
+
     def is_new(self, fingerprint: str) -> bool:
         """Devuelve True si la oferta no se había visto antes."""
         return fingerprint not in self._seen
@@ -89,7 +123,7 @@ class SeenStore:
                 offer.title,
                 offer.company,
                 offer.location,
-                offer.url,
+                canonical_url(offer.url),
                 offer.source,
                 offer.salary,
                 offer.score,

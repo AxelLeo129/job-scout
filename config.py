@@ -26,7 +26,7 @@ ENABLED_SCRAPERS = [
     "tecoloco",
     "unmejorempleo",
     "trabajosdiarios",
-    "acciontrabajo",
+    # "acciontrabajo",  # bloqueado por el anti-bots de Cloudflare (403)
 ]
 
 # Cuántas páginas de resultados recorrer por palabra clave (≈20 ofertas por página).

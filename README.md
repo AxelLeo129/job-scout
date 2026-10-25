@@ -89,7 +89,7 @@ Sigue estos pasos para configurar el proyecto localmente:
 7. ⚙️ Ajusta `config.py` a tu búsqueda:
     - `SEARCH_KEYWORDS` — los puestos que buscas
     - `COUNTRY` — `gt` para Guatemala (aplica a todos los portales)
-    - `ENABLED_SCRAPERS` — qué portales usar (por defecto los 5)
+    - `ENABLED_SCRAPERS` — qué portales usar (por defecto 4; Acción Trabajo está desactivado)
     - `MAX_PAGES_PER_KEYWORD` — páginas de resultados por búsqueda (≈20 ofertas/página)
     - `MIN_SCORE_TO_NOTIFY` — puntaje mínimo (0-100) para notificar
     - `RANKING_MODEL` — modelo de Claude para puntuar (por defecto Haiku: barato y rápido)
@@ -164,7 +164,9 @@ El resto del pipeline (ranking, Telegram) funciona sin cambios.
 - **Trabajos Diarios** busca por "puesto" (redirige al sinónimo canónico:
   p.ej. "desarrollador" → "programador"); si la palabra clave no existe como
   puesto, no devuelve nada en lugar de traer todo el listado.
-- **Acción Trabajo** pagina con scroll infinito, así que solo se lee la
+- **Acción Trabajo** está desactivado por defecto: el sitio está detrás del
+  anti-bots de Cloudflare y responde 403 a cualquier petición que no venga de
+  un navegador. Además pagina con scroll infinito, así que solo se leería la
   primera página (~20 ofertas por búsqueda).
 - **Ofertas vistas**: todas las ofertas nuevas se guardan en `seen_offers.db`
   (SQLite) tras cada ejecución — con título, empresa, puntaje, si se notificó

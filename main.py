@@ -135,13 +135,16 @@ def main() -> None:
         model=config.RANKING_MODEL,
         preferred_modalities=config.PREFERRED_MODALITIES,
     )
-    ranker.rank_all(new_offers)
+    ranked = ranker.rank_all(new_offers)
+    failed = len(new_offers) - len(ranked)
+    if failed:
+        print(f"⚠️  {failed} ofertas no se pudieron puntuar; se reintentarán la próxima vez.")
 
     # Ordenar de mayor a menor puntaje.
-    new_offers.sort(key=lambda o: o.score, reverse=True)
+    ranked.sort(key=lambda o: o.score, reverse=True)
 
     # 5. Notificar las que superen el umbral.
-    to_notify = [o for o in new_offers if o.score >= config.MIN_SCORE_TO_NOTIFY]
+    to_notify = [o for o in ranked if o.score >= config.MIN_SCORE_TO_NOTIFY]
     print(f"\n📨 {len(to_notify)} ofertas superan el umbral ({config.MIN_SCORE_TO_NOTIFY}).")
 
     notifier = None
@@ -152,6 +155,7 @@ def main() -> None:
         )
 
     sent: set[str] = set()
+    send_failed: set[str] = set()
     for offer in to_notify:
         print(f"  [{offer.score}] {offer.title} — {offer.company}")
         if notifier is not None:
@@ -160,11 +164,14 @@ def main() -> None:
                 sent.add(offer.fingerprint)
             except Exception as exc:  # noqa: BLE001
                 print(f"    ⚠️  Error enviando a Telegram: {exc}")
+                send_failed.add(offer.fingerprint)
 
-    # 6. Marcar como vistas TODAS las nuevas (incluso las que no se notificaron,
-    #    para no re-evaluarlas y gastar tokens en cada ejecución).
-    for offer in new_offers:
-        store.mark(offer, notified=offer.fingerprint in sent)
+    # 6. Marcar como vistas las puntuadas (incluso las que no superaron el
+    #    umbral, para no re-evaluarlas y gastar tokens en cada ejecución).
+    #    Las que fallaron al puntuar o al enviar no se marcan: se reintentan.
+    for offer in ranked:
+        if offer.fingerprint not in send_failed:
+            store.mark(offer, notified=offer.fingerprint in sent)
     store.save()
 
     print("\n✅ Listo.")
