@@ -7,12 +7,17 @@ el SDK asíncrono para este caso: solo necesitamos enviar mensajes salientes.
 from __future__ import annotations
 
 import html
+import time
 
 import requests
 
 from .models import JobOffer
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
+
+# Telegram admite ~1 mensaje por segundo en un mismo chat; más rápido
+# responde 429 (Too Many Requests).
+SEND_INTERVAL_SECONDS = 1.1
 
 
 class TelegramNotifier:
@@ -21,6 +26,7 @@ class TelegramNotifier:
     def __init__(self, bot_token: str, chat_id: str):
         self.bot_token = bot_token
         self.chat_id = chat_id
+        self._last_sent = 0.0
 
     def send(self, text: str) -> None:
         """Envía un mensaje con formato HTML.
@@ -36,7 +42,15 @@ class TelegramNotifier:
             "parse_mode": "HTML",
             "disable_web_page_preview": False,
         }
-        response = requests.post(url, data=payload, timeout=20)
+        response = self._post(url, payload)
+        if response.status_code == 429:
+            # Telegram indica cuántos segundos esperar; reintentamos una vez.
+            try:
+                retry_after = response.json().get("parameters", {}).get("retry_after", 5)
+            except ValueError:
+                retry_after = 5
+            time.sleep(retry_after)
+            response = self._post(url, payload)
         if not response.ok:
             # Telegram devuelve {"ok": false, "description": "..."} en los errores.
             try:
@@ -44,6 +58,16 @@ class TelegramNotifier:
             except ValueError:
                 description = response.text
             raise RuntimeError(f"Telegram {response.status_code}: {description}")
+
+    def _post(self, url: str, payload: dict) -> requests.Response:
+        """Hace el POST respetando la pausa mínima entre mensajes."""
+        wait = SEND_INTERVAL_SECONDS - (time.monotonic() - self._last_sent)
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            return requests.post(url, data=payload, timeout=20)
+        finally:
+            self._last_sent = time.monotonic()
 
     def send_offer(self, offer: JobOffer) -> None:
         """Formatea y envía una oferta concreta."""
