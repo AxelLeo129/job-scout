@@ -129,7 +129,9 @@ jobscout/
 ├── .env                     # claves secretas (NO subir a git)
 ├── .env.example             # plantilla del .env
 ├── requirements.txt         # dependencias
+├── requirements-dev.txt     # dependencias para tests (pytest)
 ├── seen_offers.db           # SQLite: historial de ofertas vistas
+├── tests/                   # tests (sin red) y HTML real de cada portal
 ├── .github/workflows/
 │   └── jobscout.yml         # cron diario en GitHub Actions
 └── jobscout/
@@ -153,6 +155,25 @@ jobscout/
 Crea `jobscout/scrapers/tu_portal.py`, hereda de `BaseScraper`, implementa
 `search()` devolviendo `JobOffer`, y regístralo en `jobscout/scrapers/__init__.py`.
 El resto del pipeline (ranking, Telegram) funciona sin cambios.
+
+---
+
+### 🧪 Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+No usan red, ni Claude, ni Telegram. Los parsers se prueban contra HTML real
+de cada portal guardado en `tests/fixtures/` (recortado a las tarjetas de
+ofertas, sin imágenes).
+
+Ojo: como usan HTML guardado, los tests **no** detectan que un portal cambió
+su diseño; eso se nota cuando un portal empieza a devolver 0 ofertas. En ese
+caso, baja la página nueva, reemplaza el fixture y ajusta los selectores
+hasta que los tests pasen. (`python main.py --debug` guarda el HTML crudo,
+pero hace una corrida completa: puntúa con Claude y escribe en la base.)
 
 ---
 

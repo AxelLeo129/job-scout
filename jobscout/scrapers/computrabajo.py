@@ -97,23 +97,24 @@ class ComputrabajoScraper(BaseScraper):
         title = link.get_text(strip=True)
         url = canonical_url(urljoin(self.base_url, link["href"]))
 
-        # Empresa: suele ser un enlace o párrafo con la clase de empresa.
+        # Empresa: <p class="dFlex ..."> con un enlace o, si es confidencial,
+        # texto suelto ("Importante empresa del sector"). Se prefiere el enlace
+        # porque el <p> puede traer también la calificación ("4.4 ★").
         company_el = (
-            article.select_one("a.fc_base.t_word_wrap")
-            or article.select_one("p.dFlex a")
+            article.select_one("p.dFlex a")
+            or article.select_one("p.dFlex")
             or article.select_one("[class*='company']")
         )
-        company = company_el.get_text(strip=True) if company_el else "—"
+        company = company_el.get_text(" ", strip=True) if company_el else ""
+        company = company or "—"
 
-        # Ubicación: párrafo con la clase de base, normalmente el último.
         location = self._extract_location(article)
-
-        # Salario: si aparece, suele tener un símbolo de moneda.
         salary = self._extract_salary(article)
 
-        # Descripción breve: el resumen que muestra el listado.
-        desc_el = article.select_one("p.fs16") or article.select_one("[class*='descrip']")
-        description = desc_el.get_text(" ", strip=True) if desc_el else ""
+        # El listado no trae descripción; pasamos la modalidad (si aparece)
+        # para que el ranking pueda valorar remoto/híbrido.
+        modality = self._icon_text(article, "i_home_office")
+        description = f"Modalidad: {modality}" if modality else ""
 
         return JobOffer(
             title=title,
@@ -126,18 +127,33 @@ class ComputrabajoScraper(BaseScraper):
         )
 
     @staticmethod
-    def _extract_location(article) -> str:
-        """Intenta encontrar la ubicación dentro del <article>."""
-        loc_el = article.select_one("p.fs16.fc_base") or article.select_one("[class*='location']")
-        if loc_el:
-            return loc_el.get_text(" ", strip=True)
-        return "—"
+    def _icon_text(article, icon_class: str) -> str:
+        """Texto del <span> que acompaña a un icono (salario, modalidad...)."""
+        icon = article.select_one(f"span.icon.{icon_class}")
+        return icon.parent.get_text(" ", strip=True) if icon and icon.parent else ""
 
     @staticmethod
-    def _extract_salary(article) -> str:
-        """Busca un texto que parezca un salario (con Q, $ o 'mensual')."""
+    def _extract_location(article) -> str:
+        """Ubicación: el <p class="fs16 fc_base"> que no es el de la empresa."""
+        loc_el = (
+            article.select_one("p.fs16.fc_base:not(.dFlex)")
+            or article.select_one("[class*='location']")
+        )
+        if loc_el:
+            return loc_el.get_text(" ", strip=True) or "—"
+        return "—"
+
+    @classmethod
+    def _extract_salary(cls, article) -> str:
+        """Salario: el texto junto al icono i_salary ("16,000.00 Q (Mensual)").
+
+        Si no hay icono, busca un monto con Q o $ delante o detrás.
+        """
+        salary = cls._icon_text(article, "i_salary")
+        if salary:
+            return salary
         text = article.get_text(" ", strip=True)
-        match = re.search(r"(Q|\$)\s?[\d.,]+(\s?-\s?(Q|\$)?\s?[\d.,]+)?", text)
+        match = re.search(r"(Q|\$)\s?[\d.,]*\d|\d[\d.,]*\s?(Q|\$)(?!\w)", text)
         return match.group(0) if match else ""
 
     def _dump_html(self, html: str, keyword: str, page: int) -> None:
