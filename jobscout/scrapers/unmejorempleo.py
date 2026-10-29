@@ -102,7 +102,9 @@ class UnMejorEmpleoScraper(BaseScraper):
         if link is None or not link.get("href"):
             return None
 
-        title = link.get_text(strip=True)
+        # El sitio resalta la palabra buscada en una etiqueta aparte; con un
+        # separador " " evitamos que quede pegada ("DesarrolladorJunior").
+        title = re.sub(r"\s+", " ", link.get_text(" ", strip=True))
         url = urljoin(page_url, link["href"])
 
         # Ubicación: "Ubicación: X | Departamento : Y" → "X, Y"

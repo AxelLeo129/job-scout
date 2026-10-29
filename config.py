@@ -12,6 +12,7 @@ SEARCH_KEYWORDS = [
     "desarrollador full stack",
     "frontend",
     "backend",
+    "programador",
 ]
 
 # País para todos los portales. "gt" = Guatemala.

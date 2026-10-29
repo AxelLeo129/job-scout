@@ -67,8 +67,9 @@ class TecolocoScraper(BaseScraper):
         soup = BeautifulSoup(html, "html.parser")
         offers: list[JobOffer] = []
 
-        # Cada oferta vive en un <div class="module job-result">.
-        for card in soup.select("div.module.job-result"):
+        # Cada oferta vive en un <div class="job-card"> (diseño actual) o en un
+        # <div class="module job-result"> (diseño anterior, por si vuelve).
+        for card in soup.select("div.job-card, div.module.job-result"):
             offer = self._parse_card(card)
             if offer is not None:
                 offers.append(offer)
@@ -88,11 +89,21 @@ class TecolocoScraper(BaseScraper):
         title = link.get_text(strip=True)
         url = urljoin(self.base_url, link["href"])
 
-        company_el = card.select_one("li[itemprop='employerName']") or card.select_one("li.name")
+        company_el = (
+            card.select_one(".job-card__content-info span.subtitle")
+            or card.select_one("li[itemprop='employerName']")
+            or card.select_one("li.name")
+        )
         company = company_el.get_text(strip=True) if company_el else "—"
 
-        loc_el = card.select_one("li[itemprop='jobLocation']") or card.select_one("li.location")
-        location = loc_el.get_text(" ", strip=True) if loc_el else "—"
+        # Ubicación: el sub-subtitle con el icono de mapa ("Ciudad Guatemala, Guatemala").
+        map_icon = card.select_one(".job-card__info-location i.map-point")
+        loc_el = (
+            (map_icon.parent if map_icon else None)
+            or card.select_one("li[itemprop='jobLocation']")
+            or card.select_one("li.location")
+        )
+        location = loc_el.get_text(" ", strip=True).replace(" ,", ",") if loc_el else "—"
 
         return JobOffer(
             title=title,
