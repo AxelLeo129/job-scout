@@ -34,6 +34,16 @@ CREATE TABLE IF NOT EXISTS seen_offers (
 )
 """
 
+# Cuántas ofertas devolvió cada portal en cada ejecución, para detectar
+# portales rotos (cambio de HTML, bloqueo) que devuelven 0 en silencio.
+_PORTAL_RUNS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS portal_runs (
+    source  TEXT NOT NULL,
+    run_at  TEXT NOT NULL,
+    offers  INTEGER NOT NULL
+)
+"""
+
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -46,6 +56,7 @@ class SeenStore:
         self.path = path
         self._conn = sqlite3.connect(path)
         self._conn.execute(_SCHEMA)
+        self._conn.execute(_PORTAL_RUNS_SCHEMA)
         self._conn.commit()
         if legacy_json_path:
             self._migrate_legacy_json(legacy_json_path)
@@ -104,6 +115,27 @@ class SeenStore:
                 self._conn.execute("DELETE FROM seen_offers WHERE fingerprint = ?", (old_fp,))
         self._conn.commit()
         print(f"🧹 Normalizadas {len(rows)} URLs con fragmento en '{self.path}'.")
+
+    def record_portal_runs(self, counts: dict[str, int]) -> None:
+        """Guarda cuántas ofertas devolvió cada portal en esta ejecución."""
+        now = _utcnow()
+        self._conn.executemany(
+            "INSERT INTO portal_runs (source, run_at, offers) VALUES (?, ?, ?)",
+            [(source, now, n) for source, n in counts.items()],
+        )
+        self._conn.commit()
+
+    def empty_streak(self, source: str) -> int:
+        """Cuántas de las últimas ejecuciones seguidas devolvieron 0 ofertas."""
+        streak = 0
+        for (offers,) in self._conn.execute(
+            "SELECT offers FROM portal_runs WHERE source = ? ORDER BY run_at DESC, rowid DESC",
+            (source,),
+        ):
+            if offers:
+                break
+            streak += 1
+        return streak
 
     def is_new(self, fingerprint: str) -> bool:
         """Devuelve True si la oferta no se había visto antes."""

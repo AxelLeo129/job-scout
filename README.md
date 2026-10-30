@@ -194,6 +194,11 @@ pero hace una corrida completa: puntúa con Claude y escribe en la base.)
   y cuándo se vio — incluso las que no superan el umbral, para no gastar
   tokens re-evaluándolas. Si quieres re-evaluar todo, borra `seen_offers.db`.
   (Si vienes de una versión vieja con `seen_offers.json`, se migra solo.)
+- **Portales rotos**: la tabla `portal_runs` de la misma base guarda cuántas
+  ofertas trajo cada portal en cada ejecución. Si uno devuelve 0 en
+  `PORTAL_ALERT_AFTER_EMPTY_RUNS` ejecuciones seguidas (3 por defecto), llega
+  un aviso por Telegram, que se repite cada 7 ejecuciones mientras siga vacío.
+  Casi siempre significa que el portal cambió su HTML o bloquea las peticiones.
 - Sé respetuoso: hay una pausa entre peticiones (`REQUEST_DELAY_SECONDS`).
 
 ---

@@ -29,9 +29,11 @@ from jobscout.scrapers import SCRAPERS
 from jobscout.storage import SeenStore
 
 
-def collect_offers(debug: bool) -> list[JobOffer]:
-    """Recorre los portales y devuelve todas las ofertas encontradas."""
+def collect_offers(debug: bool) -> tuple[list[JobOffer], dict[str, int]]:
+    """Recorre los portales y devuelve todas las ofertas encontradas, junto
+    con cuántas trajo cada portal (para detectar portales rotos)."""
     all_offers: list[JobOffer] = []
+    counts: dict[str, int] = {}
 
     for name in config.ENABLED_SCRAPERS:
         scraper_cls = SCRAPERS.get(name)
@@ -43,13 +45,36 @@ def collect_offers(debug: bool) -> list[JobOffer]:
             request_delay=config.REQUEST_DELAY_SECONDS,
             debug=debug,
         )
+        counts[name] = 0
         for keyword in config.SEARCH_KEYWORDS:
             print(f"🔎 Buscando '{keyword}' en {name} ({config.COUNTRY})...")
             found = scraper.search(keyword, max_pages=config.MAX_PAGES_PER_KEYWORD)
             print(f"   {len(found)} ofertas encontradas.")
             all_offers.extend(found)
+            counts[name] += len(found)
 
-    return all_offers
+    return all_offers, counts
+
+
+def empty_portal_alerts(store: SeenStore, counts: dict[str, int]) -> list[str]:
+    """Registra las ofertas por portal y devuelve los avisos de portales que
+    llevan PORTAL_ALERT_AFTER_EMPTY_RUNS ejecuciones seguidas sin ofertas
+    (repitiendo el aviso cada 7 ejecuciones mientras sigan vacíos)."""
+    store.record_portal_runs(counts)
+    threshold = config.PORTAL_ALERT_AFTER_EMPTY_RUNS
+    if threshold <= 0:
+        return []
+
+    alerts: list[str] = []
+    for name in counts:
+        streak = store.empty_streak(name)
+        if streak >= threshold and (streak - threshold) % 7 == 0:
+            alerts.append(
+                f"⚠️ <b>{name}</b> lleva {streak} ejecuciones seguidas sin devolver "
+                "ofertas. Puede que haya cambiado su HTML o que esté bloqueando "
+                "las peticiones; revisa los selectores del scraper."
+            )
+    return alerts
 
 
 def deduplicate(offers: list[JobOffer]) -> list[JobOffer]:
@@ -112,20 +137,41 @@ def main() -> None:
     if not args.dry_run and not (os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID")):
         sys.exit("❌ Faltan TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID en el .env (o usa --dry-run).")
 
+    notifier = None
+    if not args.dry_run:
+        notifier = TelegramNotifier(
+            bot_token=os.environ["TELEGRAM_BOT_TOKEN"],
+            chat_id=os.environ["TELEGRAM_CHAT_ID"],
+        )
+
     # 1. Recolectar y deduplicar.
-    offers = deduplicate(collect_offers(debug=args.debug))
+    found, counts = collect_offers(debug=args.debug)
+    offers = deduplicate(found)
     print(f"\n📦 {len(offers)} ofertas únicas en total.")
+
+    store = SeenStore(config.SEEN_DB_PATH, legacy_json_path=config.LEGACY_SEEN_JSON_PATH)
+
+    # Avisar de portales que llevan varias ejecuciones sin ofertas. Va antes
+    # de cualquier salida temprana para que el aviso llegue aunque no haya
+    # nada nuevo que evaluar.
+    for alert in empty_portal_alerts(store, counts):
+        print(alert.replace("<b>", "").replace("</b>", ""))
+        if notifier is not None:
+            try:
+                notifier.send(alert)
+            except Exception as exc:  # noqa: BLE001
+                print(f"    ⚠️  Error enviando a Telegram: {exc}")
 
     # 2. Descartar sectores/empresas vetados (banca, Genesis Empresarial, etc.).
     offers = filter_excluded(offers)
 
     # 3. Filtrar las ya vistas.
-    store = SeenStore(config.SEEN_DB_PATH, legacy_json_path=config.LEGACY_SEEN_JSON_PATH)
     new_offers = [o for o in offers if store.is_new(o.fingerprint)]
     print(f"🆕 {len(new_offers)} ofertas nuevas (no vistas antes).")
 
     if not new_offers:
         print("Nada nuevo que evaluar. ¡Hasta la próxima!")
+        store.save()
         return
 
     # 4. Puntuar con IA.
@@ -146,13 +192,6 @@ def main() -> None:
     # 5. Notificar las que superen el umbral.
     to_notify = [o for o in ranked if o.score >= config.MIN_SCORE_TO_NOTIFY]
     print(f"\n📨 {len(to_notify)} ofertas superan el umbral ({config.MIN_SCORE_TO_NOTIFY}).")
-
-    notifier = None
-    if not args.dry_run:
-        notifier = TelegramNotifier(
-            bot_token=os.environ["TELEGRAM_BOT_TOKEN"],
-            chat_id=os.environ["TELEGRAM_CHAT_ID"],
-        )
 
     sent: set[str] = set()
     send_failed: set[str] = set()

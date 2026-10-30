@@ -55,6 +55,11 @@ PREFERRED_MODALITIES = [
 # Subir este número = menos ofertas pero más relevantes.
 MIN_SCORE_TO_NOTIFY = 60
 
+# Si un portal devuelve 0 ofertas en esta cantidad de ejecuciones seguidas,
+# se avisa por Telegram (suele ser un cambio de HTML o un bloqueo). Mientras
+# siga vacío, el aviso se repite cada 7 ejecuciones. 0 = desactivado.
+PORTAL_ALERT_AFTER_EMPTY_RUNS = 3
+
 # Modelo de Claude usado para el ranking. Haiku es barato y rápido.
 RANKING_MODEL = "claude-haiku-4-5"
 

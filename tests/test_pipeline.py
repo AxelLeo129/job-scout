@@ -42,7 +42,9 @@ def entorno(tmp_path, monkeypatch):
 def test_fallos_no_se_marcan_como_vistos(entorno, monkeypatch):
     offers = [offer("ok_alto"), offer("ok_bajo"), offer("falla_ia"), offer("falla_tg")]
     # La misma oferta con otro fragmento cuenta una sola vez.
-    monkeypatch.setattr(main, "collect_offers", lambda debug: offers + [offer("ok_alto")])
+    monkeypatch.setattr(
+        main, "collect_offers", lambda debug: (offers + [offer("ok_alto")], {"computrabajo": 5})
+    )
 
     def rank(self, o):
         if o.title == "falla_ia":
@@ -68,6 +70,36 @@ def test_fallos_no_se_marcan_como_vistos(entorno, monkeypatch):
     # falla_ia y falla_tg no se guardan: se reintentan la próxima vez.
     # El puntaje se limita a 100.
     assert rows == [("ok_alto", 100, 1), ("ok_bajo", 10, 0)]
+
+
+def test_avisa_portal_vacio(entorno, monkeypatch):
+    """Tras 3 ejecuciones seguidas sin ofertas se avisa, y luego cada 7."""
+    monkeypatch.setattr(config, "PORTAL_ALERT_AFTER_EMPTY_RUNS", 3)
+    monkeypatch.setattr(
+        main, "collect_offers", lambda debug: ([], {"tecoloco": 0, "computrabajo": 4})
+    )
+    avisos = []
+    monkeypatch.setattr(notifier.TelegramNotifier, "send", lambda self, text: avisos.append(text))
+
+    por_ejecucion = []
+    for _ in range(11):
+        main.main()  # sin ofertas nuevas: sale temprano, pero igual avisa
+        por_ejecucion.append(len(avisos))
+        avisos.clear()
+
+    # Avisa en la ejecución 3 y en la 10; computrabajo nunca.
+    assert por_ejecucion == [0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0]
+
+
+def test_racha_se_corta_con_ofertas(tmp_path):
+    from jobscout.storage import SeenStore
+
+    store = SeenStore(str(tmp_path / "seen.db"))
+    for n in (0, 0, 7, 0, 0):
+        store.record_portal_runs({"tecoloco": n})
+    assert store.empty_streak("tecoloco") == 2
+    assert store.empty_streak("desconocido") == 0
+    store.save()
 
 
 def test_filtro_de_exclusion(monkeypatch):
