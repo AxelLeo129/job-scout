@@ -185,6 +185,11 @@ pero hace una corrida completa: puntúa con Claude y escribe en la base.)
 - **Trabajos Diarios** busca por "puesto" (redirige al sinónimo canónico:
   p.ej. "desarrollador" → "programador"); si la palabra clave no existe como
   puesto, no devuelve nada en lugar de traer todo el listado.
+- **Computrabajo** no muestra la descripción en el listado, así que para las
+  ofertas **nuevas** (no las ya vistas) se abre su página de detalle y se le
+  pasa al ranking el texto, los requisitos, el contrato y la jornada. Las
+  exclusiones se vuelven a aplicar con ese texto
+  (`EXCLUDE_SEARCH_DESCRIPTION` decide si miran la descripción).
 - **Acción Trabajo** está desactivado por defecto: el sitio está detrás del
   anti-bots de Cloudflare y responde 403 a cualquier petición que no venga de
   un navegador. Además pagina con scroll infinito, así que solo se leería la

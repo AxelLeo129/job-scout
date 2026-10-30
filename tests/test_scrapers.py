@@ -55,6 +55,19 @@ def test_computrabajo():
     assert all(o.company != "—" for o in offers)
 
 
+def test_computrabajo_detalle():
+    html = (FIXTURES / "computrabajo_detalle.html").read_text(encoding="utf-8")
+    detail = SCRAPERS["computrabajo"]._parse_detail(html)
+
+    assert detail.startswith("5,215.00 Q (Mensual) Contrato por tiempo indefinido Tiempo Completo")
+    assert "Estamos en busca de un Desarrollador Junior" in detail
+    assert "1 año de experiencia; Edad: A partir de 22 años" in detail
+    # Fuera: títulos de sección, bloques ocultos, fecha y botones.
+    for ruido in ("Descripción de la oferta", "Requerimientos", "aptitudes que faltan",
+                  "Palabras clave", "Postularme", "Denunciar"):
+        assert ruido not in detail
+
+
 def test_tecoloco():
     offers = parse("tecoloco")
     first = offers[0]

@@ -3,8 +3,9 @@
 Flujo completo:
   1. Buscar ofertas en los portales según las palabras clave (config.py).
   2. Deduplicar y descartar las ya vistas en ejecuciones anteriores.
-  3. Puntuar cada oferta nueva contra el CV usando Claude.
-  4. Enviar por Telegram las que superen el puntaje mínimo.
+  3. Leer la página de detalle de las nuevas (en los portales que lo soportan).
+  4. Puntuar cada oferta nueva contra el CV usando Claude.
+  5. Enviar por Telegram las que superen el puntaje mínimo.
 
 Uso:
     python main.py            # ejecución normal
@@ -94,25 +95,48 @@ def _normalize(text: str) -> str:
     return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
 
 
+def excluded_term(offer: JobOffer) -> str | None:
+    """Devuelve el término de config.EXCLUDE_TERMS que contiene la oferta
+    (en empresa, título y, si se configura, descripción), o None."""
+    fields = [offer.company, offer.title]
+    if config.EXCLUDE_SEARCH_DESCRIPTION:
+        fields.append(offer.description)
+    haystack = _normalize(" ".join(fields))
+    for term in config.EXCLUDE_TERMS:
+        if _normalize(term) in haystack:
+            return term
+    return None
+
+
 def filter_excluded(offers: list[JobOffer]) -> list[JobOffer]:
-    """Descarta ofertas cuya empresa, título o descripción contenga algún
-    término de config.EXCLUDE_TERMS (comparación sin mayúsculas ni acentos)."""
-    terms = [_normalize(t) for t in config.EXCLUDE_TERMS]
-    if not terms:
-        return offers
-
-    kept: list[JobOffer] = []
-    dropped = 0
-    for offer in offers:
-        haystack = _normalize(f"{offer.company} {offer.title} {offer.description}")
-        if any(term in haystack for term in terms):
-            dropped += 1
-            continue
-        kept.append(offer)
-
+    """Descarta las ofertas que contengan algún término de config.EXCLUDE_TERMS
+    (comparación sin mayúsculas ni acentos)."""
+    kept = [o for o in offers if excluded_term(o) is None]
+    dropped = len(offers) - len(kept)
     if dropped:
         print(f"🚫 {dropped} ofertas descartadas por términos excluidos.")
     return kept
+
+
+def fetch_details(offers: list[JobOffer], debug: bool) -> None:
+    """Completa cada oferta con su página de detalle, en los portales que lo
+    implementan. Si falla, la oferta sigue con los datos del listado."""
+    scrapers = {}
+    for offer in offers:
+        if offer.source not in scrapers:
+            scraper_cls = SCRAPERS.get(offer.source)
+            scrapers[offer.source] = scraper_cls and scraper_cls(
+                country=config.COUNTRY,
+                request_delay=config.REQUEST_DELAY_SECONDS,
+                debug=debug,
+            )
+        scraper = scrapers[offer.source]
+        if scraper is None:
+            continue
+        try:
+            scraper.fetch_details(offer)
+        except Exception as exc:  # noqa: BLE001 - seguimos con los datos del listado
+            print(f"  [{offer.source}] Error leyendo el detalle de '{offer.title}': {exc}")
 
 
 def load_cv() -> str:
@@ -174,7 +198,29 @@ def main() -> None:
         store.save()
         return
 
-    # 4. Puntuar con IA.
+    # 4. Completar las nuevas con su página de detalle (descripción completa)
+    #    y volver a aplicar las exclusiones, ahora con más texto. Las que caen
+    #    aquí se guardan como vistas para no bajar su detalle cada día.
+    print(f"\n📄 Leyendo el detalle de {len(new_offers)} ofertas nuevas...")
+    fetch_details(new_offers, debug=args.debug)
+    still_new: list[JobOffer] = []
+    for offer in new_offers:
+        term = excluded_term(offer)
+        if term is None:
+            still_new.append(offer)
+        else:
+            offer.score_reason = f"Descartada por término excluido: '{term}'."
+            store.mark(offer)
+    if len(still_new) < len(new_offers):
+        print(f"🚫 {len(new_offers) - len(still_new)} ofertas descartadas tras leer el detalle.")
+    new_offers = still_new
+
+    if not new_offers:
+        print("Nada nuevo que evaluar. ¡Hasta la próxima!")
+        store.save()
+        return
+
+    # 5. Puntuar con IA.
     print(f"\n🤖 Puntuando {len(new_offers)} ofertas con {config.RANKING_MODEL}...")
     ranker = Ranker(
         cv_text=load_cv(),
@@ -189,7 +235,7 @@ def main() -> None:
     # Ordenar de mayor a menor puntaje.
     ranked.sort(key=lambda o: o.score, reverse=True)
 
-    # 5. Notificar las que superen el umbral.
+    # 6. Notificar las que superen el umbral.
     to_notify = [o for o in ranked if o.score >= config.MIN_SCORE_TO_NOTIFY]
     print(f"\n📨 {len(to_notify)} ofertas superan el umbral ({config.MIN_SCORE_TO_NOTIFY}).")
 
@@ -205,7 +251,7 @@ def main() -> None:
                 print(f"    ⚠️  Error enviando a Telegram: {exc}")
                 send_failed.add(offer.fingerprint)
 
-    # 6. Marcar como vistas las puntuadas (incluso las que no superaron el
+    # 7. Marcar como vistas las puntuadas (incluso las que no superaron el
     #    umbral, para no re-evaluarlas y gastar tokens en cada ejecución).
     #    Las que fallaron al puntuar o al enviar no se marcan: se reintentan.
     for offer in ranked:

@@ -114,6 +114,9 @@ class SeenStore:
                 )
                 self._conn.execute("DELETE FROM seen_offers WHERE fingerprint = ?", (old_fp,))
         self._conn.commit()
+        # SQLite no achica el archivo al borrar filas; VACUUM libera ese
+        # espacio (en la base real, de ~3,5 MB a ~0,6 MB).
+        self._conn.execute("VACUUM")
         print(f"🧹 Normalizadas {len(rows)} URLs con fragmento en '{self.path}'.")
 
     def record_portal_runs(self, counts: dict[str, int]) -> None:

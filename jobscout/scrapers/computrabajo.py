@@ -20,6 +20,9 @@ from bs4 import BeautifulSoup
 from ..models import JobOffer, canonical_url
 from .base import BaseScraper
 
+# Tope de caracteres del detalle que se pasa al ranking (acota los tokens).
+DETAIL_MAX_CHARS = 3000
+
 
 class ComputrabajoScraper(BaseScraper):
     """Lee ofertas de Computrabajo para un país concreto."""
@@ -155,6 +158,39 @@ class ComputrabajoScraper(BaseScraper):
         text = article.get_text(" ", strip=True)
         match = re.search(r"(Q|\$)\s?[\d.,]*\d|\d[\d.,]*\s?(Q|\$)(?!\w)", text)
         return match.group(0) if match else ""
+
+    def fetch_details(self, offer: JobOffer) -> None:
+        """Añade a la descripción el detalle de la oferta (texto, requisitos,
+        contrato y jornada), que el listado no muestra."""
+        detail = self._parse_detail(self.fetch(offer.url))
+        if detail:
+            offer.description = f"{offer.description}\n{detail}".strip()
+
+    @staticmethod
+    def _parse_detail(html: str) -> str:
+        """Extrae el texto útil de <div div-link="oferta"> en la página de detalle."""
+        soup = BeautifulSoup(html, "html.parser")
+        box = soup.select_one("div[div-link='oferta']")
+        if box is None:
+            return ""
+
+        parts: list[str] = []
+        for el in box.find_all(["div", "p", "ul"], recursive=False):
+            classes = el.get("class") or []
+            # Fuera: bloques ocultos, títulos de sección (fwB), fecha y
+            # palabras clave (fc_aux) y los botones de postular/denunciar.
+            if "hide" in classes or "fwB" in classes or "fc_aux" in classes:
+                continue
+            if el.name == "div" and "mbB" not in classes:
+                continue
+            if el.name == "ul":
+                text = "; ".join(li.get_text(" ", strip=True) for li in el.select("li"))
+            else:
+                text = el.get_text(" ", strip=True)
+            if text:
+                parts.append(text)
+
+        return "\n".join(parts)[:DETAIL_MAX_CHARS]
 
     def _dump_html(self, html: str, keyword: str, page: int) -> None:
         """Guarda el HTML crudo en modo debug para revisar los selectores."""

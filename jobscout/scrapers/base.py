@@ -48,3 +48,11 @@ class BaseScraper(ABC):
     def search(self, keyword: str, max_pages: int) -> list[JobOffer]:
         """Busca ofertas para una palabra clave y las devuelve normalizadas."""
         raise NotImplementedError
+
+    def fetch_details(self, offer: JobOffer) -> None:
+        """Completa la oferta con datos de su página de detalle.
+
+        Opcional: solo lo implementan los portales cuyo listado trae poca
+        información. Se llama únicamente para las ofertas nuevas, así que
+        cuesta una petición extra por oferta nueva, no por oferta listada.
+        """

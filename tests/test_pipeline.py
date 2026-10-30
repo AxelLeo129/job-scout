@@ -36,6 +36,8 @@ def entorno(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.argv", ["main.py"])
     monkeypatch.setattr(main, "load_dotenv", lambda: None)
     monkeypatch.setattr(ranking.Ranker, "__init__", lambda self, **kw: None)
+    # Sin red: el detalle de las ofertas no se descarga.
+    monkeypatch.setattr(main, "fetch_details", lambda offers, debug: None)
     return db
 
 
@@ -102,11 +104,44 @@ def test_racha_se_corta_con_ofertas(tmp_path):
     store.save()
 
 
-def test_filtro_de_exclusion(monkeypatch):
+def test_exclusion_tras_leer_el_detalle(entorno, monkeypatch):
+    """Una oferta que solo menciona el término en el detalle se descarta sin
+    puntuarla, y se guarda como vista para no volver a bajar su detalle."""
+    monkeypatch.setattr(config, "EXCLUDE_TERMS", ["banco"])
+    monkeypatch.setattr(config, "EXCLUDE_SEARCH_DESCRIPTION", True)
+    monkeypatch.setattr(
+        main, "collect_offers", lambda debug: ([offer("dev_cliente_x"), offer("dev_ok")], {"computrabajo": 2})
+    )
+
+    def fetch_details(offers, debug):
+        for o in offers:
+            o.description = "Cliente: Banco Industrial" if o.title == "dev_cliente_x" else "SaaS"
+
+    puntuadas = []
+
+    def rank(self, o):
+        puntuadas.append(o.title)
+        return ranking.RankResult(score=10, reason="r")
+
+    monkeypatch.setattr(main, "fetch_details", fetch_details)
+    monkeypatch.setattr(ranking.Ranker, "rank", rank)
+
+    main.main()
+
+    assert puntuadas == ["dev_ok"]
+    rows = sqlite3.connect(entorno).execute(
+        "SELECT title, score_reason FROM seen_offers ORDER BY title"
+    ).fetchall()
+    assert rows == [("dev_cliente_x", "Descartada por término excluido: 'banco'."), ("dev_ok", "r")]
+
+
+@pytest.mark.parametrize("en_descripcion, esperadas", [(True, ["Frontend"]), (False, ["Programador", "Frontend"])])
+def test_filtro_de_exclusion(monkeypatch, en_descripcion, esperadas):
     monkeypatch.setattr(config, "EXCLUDE_TERMS", ["banco", "genesis empresarial"])
+    monkeypatch.setattr(config, "EXCLUDE_SEARCH_DESCRIPTION", en_descripcion)
     offers = [
         offer("Dev", company="Génesis Empresarial"),
         offer("Programador", description="Para BANCO grande"),
         offer("Frontend"),
     ]
-    assert [o.title for o in main.filter_excluded(offers)] == ["Frontend"]
+    assert [o.title for o in main.filter_excluded(offers)] == esperadas

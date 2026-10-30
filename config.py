@@ -33,8 +33,8 @@ ENABLED_SCRAPERS = [
 # Cuántas páginas de resultados recorrer por palabra clave (≈20 ofertas por página).
 MAX_PAGES_PER_KEYWORD = 2
 
-# Exclusiones DURAS: si la empresa, el título o la descripción de una oferta
-# contiene alguno de estos términos (sin importar mayúsculas/acentos), la
+# Exclusiones DURAS: si la empresa o el título (y la descripción, según
+# EXCLUDE_SEARCH_DESCRIPTION) de una oferta contiene alguno de estos términos (sin importar mayúsculas/acentos), la
 # oferta se descarta antes del ranking (no se evalúa ni se notifica). Útil
 # para vetar sectores o empresas que no te interesan.
 EXCLUDE_TERMS = [
@@ -43,6 +43,11 @@ EXCLUDE_TERMS = [
     "bancari",  # cubre "bancario", "bancaria"
     "genesis empresarial",
 ]
+
+# ¿Buscar también los EXCLUDE_TERMS en la descripción? True descarta, p.ej.,
+# una oferta de una empresa de software que pide "experiencia en banca
+# deseable". False solo mira empresa y título.
+EXCLUDE_SEARCH_DESCRIPTION = False
 
 # Modalidades a PRIORIZAR en el ranking: la IA les sube el puntaje. No
 # descarta las demás (presenciales), solo favorece estas.
