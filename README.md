@@ -152,9 +152,14 @@ jobscout/
 
 ### ➕ Añadir más portales
 
-Crea `jobscout/scrapers/tu_portal.py`, hereda de `BaseScraper`, implementa
-`search()` devolviendo `JobOffer`, y regístralo en `jobscout/scrapers/__init__.py`.
-El resto del pipeline (ranking, Telegram) funciona sin cambios.
+Crea `jobscout/scrapers/tu_portal.py` con una clase que herede de
+`BaseScraper`, define `source_name` y `base_url_template` (p.ej.
+`"https://{country}.portal.com"`), implementa `search()` devolviendo
+`JobOffer` y regístrala en `SCRAPERS` (`jobscout/scrapers/__init__.py`). La
+base ya trae la sesión HTTP, la pausa entre peticiones (`request()`/`fetch()`)
+y el volcado de HTML en modo debug (`dump_html()`). Si el listado trae poca
+información, implementa también `fetch_details()`, que solo se llama para las
+ofertas nuevas. El resto del pipeline (ranking, Telegram) funciona sin cambios.
 
 ---
 

@@ -1,9 +1,7 @@
-"""Ranking de ofertas con IA (Claude).
+"""Ranking de ofertas con Claude.
 
-Para cada oferta, Claude lee el CV y la descripción y devuelve un puntaje de
-0 a 100 más una razón corta. Usamos salida estructurada (Pydantic) para que la
-respuesta sea siempre parseable, y el modelo Haiku porque es barato y rápido
-para puntuar muchas ofertas.
+Cada oferta se puntúa de 0 a 100 contra el CV usando salida estructurada,
+de modo que la respuesta siempre se convierte en :class:`RankResult`.
 """
 
 from __future__ import annotations
@@ -13,6 +11,16 @@ from pydantic import BaseModel, Field
 
 from .models import JobOffer
 
+MAX_OUTPUT_TOKENS = 512
+
+SYSTEM_PROMPT = (
+    "Eres un asistente experto en reclutamiento técnico. Evalúas qué tan bien "
+    "encaja una oferta de empleo con el perfil de un candidato, basándote en su "
+    "CV. Considera: tecnologías que coinciden, nivel del puesto, modalidad y "
+    "ubicación. Sé honesto: una oferta que no encaja debe recibir un puntaje "
+    "bajo. Responde siempre en español."
+)
+
 
 class RankResult(BaseModel):
     """Resultado estructurado del ranking de una oferta."""
@@ -21,15 +29,15 @@ class RankResult(BaseModel):
     reason: str = Field(description="Justificación breve (1-2 frases, en español) del puntaje.")
 
 
-SYSTEM_PROMPT = """Eres un asistente experto en reclutamiento técnico. Evalúas \
-qué tan bien encaja una oferta de empleo con el perfil de un candidato, basándote \
-en su CV. Considera: tecnologías que coinciden, nivel del puesto, modalidad y \
-ubicación. Sé honesto: una oferta que no encaja debe recibir un puntaje bajo. \
-Responde siempre en español."""
-
-
 class Ranker:
-    """Puntúa ofertas comparándolas con un CV mediante Claude."""
+    """Puntúa ofertas contra un CV con Claude.
+
+    Args:
+        cv_text: CV en texto plano.
+        model: ID del modelo de Claude.
+        preferred_modalities: Modalidades (p.ej. "remoto") cuyas ofertas deben
+            puntuar más alto; las presenciales bajan, pero no se descartan.
+    """
 
     def __init__(self, cv_text: str, model: str, preferred_modalities: list[str] | None = None):
         self.cv_text = cv_text
@@ -39,22 +47,25 @@ class Ranker:
 
     @property
     def system_prompt(self) -> str:
-        """Prompt de sistema, con la preferencia de modalidad si aplica."""
+        """Prompt de sistema con la preferencia de modalidad, si la hay."""
         if not self.preferred_modalities:
             return SYSTEM_PROMPT
-        modalidades = " o ".join(self.preferred_modalities)
+        modalities = " o ".join(self.preferred_modalities)
         return (
-            SYSTEM_PROMPT
-            + f" IMPORTANTE: el candidato prefiere trabajo {modalidades}; "
+            f"{SYSTEM_PROMPT} IMPORTANTE: el candidato prefiere trabajo {modalities}; "
             "sube el puntaje a las ofertas con esa modalidad y baja el de las "
             "presenciales, pero sin descartarlas del todo si encajan muy bien."
         )
 
     def rank(self, offer: JobOffer) -> RankResult:
-        """Devuelve el puntaje y la razón para una oferta."""
+        """Puntúa una oferta.
+
+        Raises:
+            anthropic.APIError: si falla la API (sin saldo, límite de peticiones, caída).
+        """
         user_prompt = (
             f"=== CV DEL CANDIDATO ===\n{self.cv_text}\n\n"
-            f"=== OFERTA DE EMPLEO ===\n"
+            "=== OFERTA DE EMPLEO ===\n"
             f"Título: {offer.title}\n"
             f"Empresa: {offer.company}\n"
             f"Ubicación: {offer.location}\n"
@@ -62,10 +73,9 @@ class Ranker:
             f"Descripción: {offer.description or 'no disponible'}\n\n"
             "Evalúa qué tan bien encaja esta oferta con el candidato."
         )
-
         response = self.client.messages.parse(
             model=self.model,
-            max_tokens=512,
+            max_tokens=MAX_OUTPUT_TOKENS,
             system=self.system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
             output_format=RankResult,
@@ -73,17 +83,16 @@ class Ranker:
         return response.parsed_output
 
     def rank_all(self, offers: list[JobOffer]) -> list[JobOffer]:
-        """Puntúa una lista de ofertas, escribiendo score y razón en cada una.
+        """Puntúa ``offers`` en su lugar y devuelve las que se pudieron puntuar.
 
-        Devuelve solo las que se pudieron puntuar; las que fallan (sin saldo,
-        límite de peticiones, caída de la API) quedan fuera para que se
-        reintenten en la próxima ejecución.
+        Las que fallan quedan fuera para que se reintenten en la próxima
+        ejecución. El puntaje se limita a 0-100.
         """
         ranked: list[JobOffer] = []
         for offer in offers:
             try:
                 result = self.rank(offer)
-            except Exception as exc:  # noqa: BLE001 - una oferta no debe romper todo
+            except Exception as exc:  # noqa: BLE001 - una oferta no debe detener la ejecución
                 print(f"  [ranking] Error puntuando '{offer.title}': {exc}")
                 continue
             offer.score = max(0, min(100, result.score))

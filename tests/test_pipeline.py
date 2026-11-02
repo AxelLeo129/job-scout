@@ -1,4 +1,4 @@
-"""Tests del flujo de main.py, sin red: scrapers, Claude y Telegram simulados."""
+"""Tests for the main.py pipeline with boards, Claude and Telegram mocked."""
 
 import sqlite3
 
@@ -8,9 +8,10 @@ import config
 import main
 from jobscout import notifier, ranking
 from jobscout.models import JobOffer
+from jobscout.storage import SeenStore
 
 
-def offer(title: str, company: str = "c", description: str = "") -> JobOffer:
+def make_offer(title: str, company: str = "c", description: str = "") -> JobOffer:
     return JobOffer(
         title=title,
         company=company,
@@ -22,13 +23,14 @@ def offer(title: str, company: str = "c", description: str = "") -> JobOffer:
 
 
 @pytest.fixture
-def entorno(tmp_path, monkeypatch):
+def env(tmp_path, monkeypatch):
+    """Isolated config and credentials; no network. Returns the DB path."""
     cv = tmp_path / "cv.txt"
     cv.write_text("cv", encoding="utf-8")
     db = tmp_path / "seen.db"
     monkeypatch.setattr(config, "SEEN_DB_PATH", str(db))
     monkeypatch.setattr(config, "CV_PATH", str(cv))
-    monkeypatch.setattr(config, "LEGACY_SEEN_JSON_PATH", str(tmp_path / "no.json"))
+    monkeypatch.setattr(config, "LEGACY_SEEN_JSON_PATH", str(tmp_path / "missing.json"))
     monkeypatch.setattr(config, "MIN_SCORE_TO_NOTIFY", 60)
     monkeypatch.setattr(config, "EXCLUDE_TERMS", [])
     for var in ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
@@ -36,91 +38,84 @@ def entorno(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.argv", ["main.py"])
     monkeypatch.setattr(main, "load_dotenv", lambda: None)
     monkeypatch.setattr(ranking.Ranker, "__init__", lambda self, **kw: None)
-    # Sin red: el detalle de las ofertas no se descarga.
     monkeypatch.setattr(main, "fetch_details", lambda offers, debug: None)
     return db
 
 
-def test_fallos_no_se_marcan_como_vistos(entorno, monkeypatch):
-    offers = [offer("ok_alto"), offer("ok_bajo"), offer("falla_ia"), offer("falla_tg")]
-    # La misma oferta con otro fragmento cuenta una sola vez.
+def test_failures_are_not_marked_as_seen(env, monkeypatch):
+    offers = [make_offer("ok_high"), make_offer("ok_low"), make_offer("ai_fails"), make_offer("tg_fails")]
+    # Same offer again (same URL once the fragment is stripped).
     monkeypatch.setattr(
-        main, "collect_offers", lambda debug: (offers + [offer("ok_alto")], {"computrabajo": 5})
+        main, "collect_offers", lambda debug: (offers + [make_offer("ok_high")], {"computrabajo": 5})
     )
 
-    def rank(self, o):
-        if o.title == "falla_ia":
-            raise RuntimeError("sin saldo")
-        return ranking.RankResult(score=10 if o.title == "ok_bajo" else 150, reason="r")
+    def rank(self, offer):
+        if offer.title == "ai_fails":
+            raise RuntimeError("no credit")
+        return ranking.RankResult(score=10 if offer.title == "ok_low" else 150, reason="r")
 
-    enviados = []
+    sent = []
 
-    def send_offer(self, o):
-        if o.title == "falla_tg":
+    def send_offer(self, offer):
+        if offer.title == "tg_fails":
             raise RuntimeError("Telegram 429")
-        enviados.append(o.title)
+        sent.append(offer.title)
 
     monkeypatch.setattr(ranking.Ranker, "rank", rank)
     monkeypatch.setattr(notifier.TelegramNotifier, "send_offer", send_offer)
 
     main.main()
 
-    rows = sqlite3.connect(entorno).execute(
+    rows = sqlite3.connect(env).execute(
         "SELECT title, score, notified FROM seen_offers ORDER BY title"
     ).fetchall()
-    assert enviados == ["ok_alto"]
-    # falla_ia y falla_tg no se guardan: se reintentan la próxima vez.
-    # El puntaje se limita a 100.
-    assert rows == [("ok_alto", 100, 1), ("ok_bajo", 10, 0)]
+    assert sent == ["ok_high"]
+    # ai_fails and tg_fails are retried next run; the score is clamped to 100.
+    assert rows == [("ok_high", 100, 1), ("ok_low", 10, 0)]
 
 
-def test_avisa_portal_vacio(entorno, monkeypatch):
-    """Tras 3 ejecuciones seguidas sin ofertas se avisa, y luego cada 7."""
+def test_alerts_on_empty_portal(env, monkeypatch):
+    """Alert on the 3rd consecutive empty run, then every 7 runs."""
     monkeypatch.setattr(config, "PORTAL_ALERT_AFTER_EMPTY_RUNS", 3)
-    monkeypatch.setattr(
-        main, "collect_offers", lambda debug: ([], {"tecoloco": 0, "computrabajo": 4})
-    )
-    avisos = []
-    monkeypatch.setattr(notifier.TelegramNotifier, "send", lambda self, text: avisos.append(text))
+    monkeypatch.setattr(main, "collect_offers", lambda debug: ([], {"tecoloco": 0, "computrabajo": 4}))
+    alerts = []
+    monkeypatch.setattr(notifier.TelegramNotifier, "send", lambda self, text: alerts.append(text))
 
-    por_ejecucion = []
+    alerts_per_run = []
     for _ in range(11):
-        main.main()  # sin ofertas nuevas: sale temprano, pero igual avisa
-        por_ejecucion.append(len(avisos))
-        avisos.clear()
+        main.main()  # nothing new: returns early but still alerts
+        alerts_per_run.append(len(alerts))
+        alerts.clear()
 
-    # Avisa en la ejecución 3 y en la 10; computrabajo nunca.
-    assert por_ejecucion == [0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0]
-
-
-def test_racha_se_corta_con_ofertas(tmp_path):
-    from jobscout.storage import SeenStore
-
-    store = SeenStore(str(tmp_path / "seen.db"))
-    for n in (0, 0, 7, 0, 0):
-        store.record_portal_runs({"tecoloco": n})
-    assert store.empty_streak("tecoloco") == 2
-    assert store.empty_streak("desconocido") == 0
-    store.save()
+    assert alerts_per_run == [0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0]
 
 
-def test_exclusion_tras_leer_el_detalle(entorno, monkeypatch):
-    """Una oferta que solo menciona el término en el detalle se descarta sin
-    puntuarla, y se guarda como vista para no volver a bajar su detalle."""
+def test_empty_streak_resets_with_offers(tmp_path):
+    with SeenStore(str(tmp_path / "seen.db")) as store:
+        for n in (0, 0, 7, 0, 0):
+            store.record_portal_runs({"tecoloco": n})
+        assert store.empty_streak("tecoloco") == 2
+        assert store.empty_streak("unknown") == 0
+
+
+def test_exclusion_after_details(env, monkeypatch):
+    """An offer whose term only appears in its details is not scored and is stored as seen."""
     monkeypatch.setattr(config, "EXCLUDE_TERMS", ["banco"])
     monkeypatch.setattr(config, "EXCLUDE_SEARCH_DESCRIPTION", True)
     monkeypatch.setattr(
-        main, "collect_offers", lambda debug: ([offer("dev_cliente_x"), offer("dev_ok")], {"computrabajo": 2})
+        main,
+        "collect_offers",
+        lambda debug: ([make_offer("dev_client_x"), make_offer("dev_ok")], {"computrabajo": 2}),
     )
 
     def fetch_details(offers, debug):
-        for o in offers:
-            o.description = "Cliente: Banco Industrial" if o.title == "dev_cliente_x" else "SaaS"
+        for offer in offers:
+            offer.description = "Cliente: Banco Industrial" if offer.title == "dev_client_x" else "SaaS"
 
-    puntuadas = []
+    scored = []
 
-    def rank(self, o):
-        puntuadas.append(o.title)
+    def rank(self, offer):
+        scored.append(offer.title)
         return ranking.RankResult(score=10, reason="r")
 
     monkeypatch.setattr(main, "fetch_details", fetch_details)
@@ -128,20 +123,23 @@ def test_exclusion_tras_leer_el_detalle(entorno, monkeypatch):
 
     main.main()
 
-    assert puntuadas == ["dev_ok"]
-    rows = sqlite3.connect(entorno).execute(
+    assert scored == ["dev_ok"]
+    rows = sqlite3.connect(env).execute(
         "SELECT title, score_reason FROM seen_offers ORDER BY title"
     ).fetchall()
-    assert rows == [("dev_cliente_x", "Descartada por término excluido: 'banco'."), ("dev_ok", "r")]
+    assert rows == [("dev_client_x", "Descartada por término excluido: 'banco'."), ("dev_ok", "r")]
 
 
-@pytest.mark.parametrize("en_descripcion, esperadas", [(True, ["Frontend"]), (False, ["Programador", "Frontend"])])
-def test_filtro_de_exclusion(monkeypatch, en_descripcion, esperadas):
+@pytest.mark.parametrize(
+    "search_description, expected",
+    [(True, ["Frontend"]), (False, ["Programador", "Frontend"])],
+)
+def test_filter_excluded(monkeypatch, search_description, expected):
     monkeypatch.setattr(config, "EXCLUDE_TERMS", ["banco", "genesis empresarial"])
-    monkeypatch.setattr(config, "EXCLUDE_SEARCH_DESCRIPTION", en_descripcion)
+    monkeypatch.setattr(config, "EXCLUDE_SEARCH_DESCRIPTION", search_description)
     offers = [
-        offer("Dev", company="Génesis Empresarial"),
-        offer("Programador", description="Para BANCO grande"),
-        offer("Frontend"),
+        make_offer("Dev", company="Génesis Empresarial"),
+        make_offer("Programador", description="Para BANCO grande"),
+        make_offer("Frontend"),
     ]
-    assert [o.title for o in main.filter_excluded(offers)] == esperadas
+    assert [o.title for o in main.filter_excluded(offers)] == expected

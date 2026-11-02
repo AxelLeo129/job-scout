@@ -1,12 +1,9 @@
-"""Memoria de ofertas ya vistas.
+"""Base SQLite con las ofertas procesadas y estadísticas por portal.
 
-Guarda las ofertas ya procesadas en una base SQLite, con su puntaje y
-metadatos, para no volver a evaluarlas ni notificarlas en ejecuciones
-posteriores. Además de evitar repetidos, la base sirve como historial
-consultable (qué se vio, cuándo, qué puntaje sacó y si se notificó).
-
-Si existe el antiguo seen_offers.json (solo huellas), sus datos se migran
-automáticamente la primera vez y el archivo se renombra a *.migrated.
+``seen_offers`` guarda cada oferta puntuada (puntaje, razón, si se notificó)
+para no puntuarla ni notificarla dos veces. ``portal_runs`` guarda cuántas
+ofertas devolvió cada portal en cada ejecución, para detectar portales que
+dejan de funcionar sin dar error.
 """
 
 from __future__ import annotations
@@ -15,6 +12,7 @@ import json
 import os
 import sqlite3
 from datetime import datetime, timezone
+from types import TracebackType
 
 from .models import JobOffer, canonical_url, fingerprint_url
 
@@ -31,17 +29,12 @@ CREATE TABLE IF NOT EXISTS seen_offers (
     score_reason  TEXT NOT NULL DEFAULT '',
     notified      INTEGER NOT NULL DEFAULT 0,
     first_seen_at TEXT NOT NULL
-)
-"""
-
-# Cuántas ofertas devolvió cada portal en cada ejecución, para detectar
-# portales rotos (cambio de HTML, bloqueo) que devuelven 0 en silencio.
-_PORTAL_RUNS_SCHEMA = """
+);
 CREATE TABLE IF NOT EXISTS portal_runs (
     source  TEXT NOT NULL,
     run_at  TEXT NOT NULL,
     offers  INTEGER NOT NULL
-)
+);
 """
 
 
@@ -50,14 +43,17 @@ def _utcnow() -> str:
 
 
 class SeenStore:
-    """Registro persistente (SQLite) de ofertas ya procesadas."""
+    """Registro persistente de ofertas procesadas.
+
+    Se usa como context manager: al salir confirma los cambios y cierra la
+    conexión. Al abrirse aplica las migraciones pendientes (JSON antiguo,
+    URLs con fragmento).
+    """
 
     def __init__(self, path: str, legacy_json_path: str | None = None):
         self.path = path
         self._conn = sqlite3.connect(path)
-        self._conn.execute(_SCHEMA)
-        self._conn.execute(_PORTAL_RUNS_SCHEMA)
-        self._conn.commit()
+        self._conn.executescript(_SCHEMA)
         if legacy_json_path:
             self._migrate_legacy_json(legacy_json_path)
         self._canonicalize_urls()
@@ -65,8 +61,74 @@ class SeenStore:
             row[0] for row in self._conn.execute("SELECT fingerprint FROM seen_offers")
         }
 
+    def __enter__(self) -> SeenStore:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    def is_new(self, fingerprint: str) -> bool:
+        """Indica si no hay ninguna oferta guardada con ``fingerprint``."""
+        return fingerprint not in self._seen
+
+    def mark(self, offer: JobOffer, notified: bool = False) -> None:
+        """Guarda ``offer`` como procesada. Si la huella ya existe, no la modifica."""
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO seen_offers
+                (fingerprint, title, company, location, url, source, salary,
+                 score, score_reason, notified, first_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                offer.fingerprint,
+                offer.title,
+                offer.company,
+                offer.location,
+                canonical_url(offer.url),
+                offer.source,
+                offer.salary,
+                offer.score,
+                offer.score_reason,
+                int(notified),
+                _utcnow(),
+            ),
+        )
+        self._seen.add(offer.fingerprint)
+
+    def record_portal_runs(self, counts: dict[str, int]) -> None:
+        """Guarda cuántas ofertas devolvió cada portal en esta ejecución."""
+        now = _utcnow()
+        self._conn.executemany(
+            "INSERT INTO portal_runs (source, run_at, offers) VALUES (?, ?, ?)",
+            [(source, now, n) for source, n in counts.items()],
+        )
+        self._conn.commit()
+
+    def empty_streak(self, source: str) -> int:
+        """Cantidad de ejecuciones recientes seguidas en que ``source`` devolvió 0 ofertas."""
+        streak = 0
+        for (offers,) in self._conn.execute(
+            "SELECT offers FROM portal_runs WHERE source = ? ORDER BY run_at DESC, rowid DESC",
+            (source,),
+        ):
+            if offers:
+                break
+            streak += 1
+        return streak
+
+    def close(self) -> None:
+        """Confirma los cambios pendientes y cierra la conexión."""
+        self._conn.commit()
+        self._conn.close()
+
     def _migrate_legacy_json(self, json_path: str) -> None:
-        """Importa las huellas del viejo seen_offers.json (una sola vez)."""
+        """Importa las huellas del antiguo seen_offers.json y lo renombra a *.migrated."""
         if not os.path.exists(json_path):
             return
         try:
@@ -84,11 +146,11 @@ class SeenStore:
         print(f"📦 Migradas {len(fingerprints)} huellas de '{json_path}' a '{self.path}'.")
 
     def _canonicalize_urls(self) -> None:
-        """Fusiona las filas guardadas con URL con fragmento (#...).
+        """Fusiona las filas guardadas con URL con fragmento en una fila por oferta.
 
-        Antes la huella incluía el fragmento, así que la misma oferta de
-        Computrabajo quedó guardada varias veces. Se deja una fila por URL
-        canónica, con la fecha más antigua y notified=1 si alguna lo tenía.
+        Antes la huella incluía el fragmento de la URL, así que la misma oferta
+        de Computrabajo quedó guardada varias veces. La fila resultante conserva
+        el ``first_seen_at`` más antiguo y ``notified=1`` si algún duplicado lo tenía.
         """
         rows = self._conn.execute(
             "SELECT fingerprint, url, notified, first_seen_at FROM seen_offers "
@@ -114,62 +176,6 @@ class SeenStore:
                 )
                 self._conn.execute("DELETE FROM seen_offers WHERE fingerprint = ?", (old_fp,))
         self._conn.commit()
-        # SQLite no achica el archivo al borrar filas; VACUUM libera ese
-        # espacio (en la base real, de ~3,5 MB a ~0,6 MB).
+        # SQLite no achica el archivo al borrar filas.
         self._conn.execute("VACUUM")
         print(f"🧹 Normalizadas {len(rows)} URLs con fragmento en '{self.path}'.")
-
-    def record_portal_runs(self, counts: dict[str, int]) -> None:
-        """Guarda cuántas ofertas devolvió cada portal en esta ejecución."""
-        now = _utcnow()
-        self._conn.executemany(
-            "INSERT INTO portal_runs (source, run_at, offers) VALUES (?, ?, ?)",
-            [(source, now, n) for source, n in counts.items()],
-        )
-        self._conn.commit()
-
-    def empty_streak(self, source: str) -> int:
-        """Cuántas de las últimas ejecuciones seguidas devolvieron 0 ofertas."""
-        streak = 0
-        for (offers,) in self._conn.execute(
-            "SELECT offers FROM portal_runs WHERE source = ? ORDER BY run_at DESC, rowid DESC",
-            (source,),
-        ):
-            if offers:
-                break
-            streak += 1
-        return streak
-
-    def is_new(self, fingerprint: str) -> bool:
-        """Devuelve True si la oferta no se había visto antes."""
-        return fingerprint not in self._seen
-
-    def mark(self, offer: JobOffer, notified: bool = False) -> None:
-        """Registra una oferta como vista, con sus datos y puntaje."""
-        self._conn.execute(
-            """
-            INSERT OR IGNORE INTO seen_offers
-                (fingerprint, title, company, location, url, source, salary,
-                 score, score_reason, notified, first_seen_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                offer.fingerprint,
-                offer.title,
-                offer.company,
-                offer.location,
-                canonical_url(offer.url),
-                offer.source,
-                offer.salary,
-                offer.score,
-                offer.score_reason,
-                int(notified),
-                _utcnow(),
-            ),
-        )
-        self._seen.add(offer.fingerprint)
-
-    def save(self) -> None:
-        """Confirma los cambios y cierra la conexión."""
-        self._conn.commit()
-        self._conn.close()

@@ -1,51 +1,28 @@
 """Scraper de Computrabajo.
 
-Computrabajo no tiene API pública, así que leemos el HTML de las páginas de
-resultados. La estructura del sitio cambia cada cierto tiempo; por eso los
-selectores se prueban en orden (varias alternativas) y, si todo falla, se puede
-volcar el HTML crudo con el modo debug para ajustar los selectores.
-
-URL de búsqueda (Guatemala):
-    https://gt.computrabajo.com/trabajo-de-desarrollador-de-software
-    ...y para paginar:  ?p=2
+URL de búsqueda: ``https://<país>.computrabajo.com/trabajo-de-<slug>?p=<página>``.
+Las tarjetas del listado no traen descripción, así que
+:meth:`ComputrabajoScraper.fetch_details` la lee de la página de cada oferta.
 """
 
 from __future__ import annotations
 
-import re
 from urllib.parse import quote, urljoin
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from ..models import JobOffer, canonical_url
-from .base import BaseScraper
+from .base import BaseScraper, find_salary
 
-# Tope de caracteres del detalle que se pasa al ranking (acota los tokens).
+# Tope del texto de detalle que se pasa al ranking (acota los tokens).
 DETAIL_MAX_CHARS = 3000
 
 
 class ComputrabajoScraper(BaseScraper):
-    """Lee ofertas de Computrabajo para un país concreto."""
+    """Scraper de <país>.computrabajo.com."""
 
     source_name = "computrabajo"
-
-    def __init__(self, country: str = "gt", request_delay: float = 1.5, debug: bool = False):
-        super().__init__(request_delay=request_delay)
-        self.country = country
-        self.base_url = f"https://{country}.computrabajo.com"
-        self.debug = debug
-
-    def _build_search_url(self, keyword: str, page: int) -> str:
-        """Construye la URL de búsqueda para una palabra clave y página.
-
-        Computrabajo usa rutas tipo "/trabajo-de-<slug>" donde el slug es la
-        palabra clave con guiones en lugar de espacios.
-        """
-        slug = quote(keyword.strip().lower().replace(" ", "-"))
-        url = f"{self.base_url}/trabajo-de-{slug}"
-        if page > 1:
-            url += f"?p={page}"
-        return url
+    base_url_template = "https://{country}.computrabajo.com"
 
     def search(self, keyword: str, max_pages: int) -> list[JobOffer]:
         offers: list[JobOffer] = []
@@ -53,42 +30,41 @@ class ComputrabajoScraper(BaseScraper):
             url = self._build_search_url(keyword, page)
             try:
                 html = self.fetch(url)
-            except Exception as exc:  # noqa: BLE001 - registramos y seguimos
-                print(f"  [computrabajo] Error al leer {url}: {exc}")
+            except Exception as exc:  # noqa: BLE001 - una página caída no detiene la ejecución
+                self.log(f"Error al leer {url}: {exc}")
                 break
 
             if self.debug:
-                self._dump_html(html, keyword, page)
+                self.dump_html(html, keyword, page)
 
             page_offers = self._parse_results(html)
             if not page_offers:
-                # Si una página no trae resultados, no tiene sentido seguir.
                 break
             offers.extend(page_offers)
 
         return offers
 
+    def fetch_details(self, offer: JobOffer) -> None:
+        """Añade a la descripción el texto de la página de detalle (cuerpo,
+        requisitos, contrato y jornada)."""
+        detail = self._parse_detail(self.fetch(offer.url))
+        if detail:
+            offer.description = f"{offer.description}\n{detail}".strip()
+
+    def _build_search_url(self, keyword: str, page: int) -> str:
+        slug = quote(keyword.strip().lower().replace(" ", "-"))
+        url = f"{self.base_url}/trabajo-de-{slug}"
+        if page > 1:
+            url += f"?p={page}"
+        return url
+
     def _parse_results(self, html: str) -> list[JobOffer]:
-        """Extrae las ofertas de una página de resultados."""
         soup = BeautifulSoup(html, "html.parser")
-        offers: list[JobOffer] = []
-
-        # Cada oferta vive en un <article>. Probamos varias clases conocidas.
         articles = soup.select("article.box_offer") or soup.select("article")
+        return [offer for article in articles if (offer := self._parse_article(article))]
 
-        for article in articles:
-            offer = self._parse_article(article)
-            if offer is not None:
-                offers.append(offer)
-
-        return offers
-
-    def _parse_article(self, article) -> JobOffer | None:
-        """Convierte un <article> de Computrabajo en un JobOffer.
-
-        Devuelve None si no se encuentra un título/enlace válido.
-        """
-        # Título y enlace: el <a> dentro del encabezado de la oferta.
+    def _parse_article(self, article: Tag) -> JobOffer | None:
+        """Construye un JobOffer a partir de un ``<article>``; None si no tiene enlace."""
         link = (
             article.select_one("h2 a")
             or article.select_one("a.js-o-link")
@@ -97,78 +73,45 @@ class ComputrabajoScraper(BaseScraper):
         if link is None or not link.get("href"):
             return None
 
-        title = link.get_text(strip=True)
-        url = canonical_url(urljoin(self.base_url, link["href"]))
-
-        # Empresa: <p class="dFlex ..."> con un enlace o, si es confidencial,
-        # texto suelto ("Importante empresa del sector"). Se prefiere el enlace
-        # porque el <p> puede traer también la calificación ("4.4 ★").
+        # Las empresas confidenciales traen texto suelto en vez de enlace; se
+        # prefiere el enlace porque el <p> puede incluir la calificación ("4.4 ★").
         company_el = (
             article.select_one("p.dFlex a")
             or article.select_one("p.dFlex")
             or article.select_one("[class*='company']")
         )
         company = company_el.get_text(" ", strip=True) if company_el else ""
-        company = company or "—"
 
-        location = self._extract_location(article)
-        salary = self._extract_salary(article)
-
-        # El listado no trae descripción; pasamos la modalidad (si aparece)
-        # para que el ranking pueda valorar remoto/híbrido.
         modality = self._icon_text(article, "i_home_office")
-        description = f"Modalidad: {modality}" if modality else ""
 
         return JobOffer(
-            title=title,
-            company=company,
-            location=location,
-            url=url,
+            title=link.get_text(strip=True),
+            company=company or "—",
+            location=self._extract_location(article),
+            url=canonical_url(urljoin(self.base_url, link["href"])),
             source=self.source_name,
-            description=description,
-            salary=salary,
+            description=f"Modalidad: {modality}" if modality else "",
+            salary=self._icon_text(article, "i_salary") or find_salary(article.get_text(" ", strip=True)),
         )
 
     @staticmethod
-    def _icon_text(article, icon_class: str) -> str:
-        """Texto del <span> que acompaña a un icono (salario, modalidad...)."""
+    def _icon_text(article: Tag, icon_class: str) -> str:
+        """Texto del elemento que contiene ``span.icon.<icon_class>``."""
         icon = article.select_one(f"span.icon.{icon_class}")
         return icon.parent.get_text(" ", strip=True) if icon and icon.parent else ""
 
     @staticmethod
-    def _extract_location(article) -> str:
-        """Ubicación: el <p class="fs16 fc_base"> que no es el de la empresa."""
+    def _extract_location(article: Tag) -> str:
+        # Empresa y ubicación son ambos p.fs16.fc_base; el de la empresa además lleva .dFlex.
         loc_el = (
             article.select_one("p.fs16.fc_base:not(.dFlex)")
             or article.select_one("[class*='location']")
         )
-        if loc_el:
-            return loc_el.get_text(" ", strip=True) or "—"
-        return "—"
-
-    @classmethod
-    def _extract_salary(cls, article) -> str:
-        """Salario: el texto junto al icono i_salary ("16,000.00 Q (Mensual)").
-
-        Si no hay icono, busca un monto con Q o $ delante o detrás.
-        """
-        salary = cls._icon_text(article, "i_salary")
-        if salary:
-            return salary
-        text = article.get_text(" ", strip=True)
-        match = re.search(r"(Q|\$)\s?[\d.,]*\d|\d[\d.,]*\s?(Q|\$)(?!\w)", text)
-        return match.group(0) if match else ""
-
-    def fetch_details(self, offer: JobOffer) -> None:
-        """Añade a la descripción el detalle de la oferta (texto, requisitos,
-        contrato y jornada), que el listado no muestra."""
-        detail = self._parse_detail(self.fetch(offer.url))
-        if detail:
-            offer.description = f"{offer.description}\n{detail}".strip()
+        return (loc_el.get_text(" ", strip=True) if loc_el else "") or "—"
 
     @staticmethod
     def _parse_detail(html: str) -> str:
-        """Extrae el texto útil de <div div-link="oferta"> en la página de detalle."""
+        """Extrae el texto útil de ``div[div-link='oferta']`` en la página de detalle."""
         soup = BeautifulSoup(html, "html.parser")
         box = soup.select_one("div[div-link='oferta']")
         if box is None:
@@ -177,9 +120,9 @@ class ComputrabajoScraper(BaseScraper):
         parts: list[str] = []
         for el in box.find_all(["div", "p", "ul"], recursive=False):
             classes = el.get("class") or []
-            # Fuera: bloques ocultos, títulos de sección (fwB), fecha y
-            # palabras clave (fc_aux) y los botones de postular/denunciar.
-            if "hide" in classes or "fwB" in classes or "fc_aux" in classes:
+            # Se omiten bloques ocultos, títulos de sección (fwB), fecha y palabras
+            # clave (fc_aux) y las filas de botones postular/denunciar (div sin mbB).
+            if {"hide", "fwB", "fc_aux"} & set(classes):
                 continue
             if el.name == "div" and "mbB" not in classes:
                 continue
@@ -191,11 +134,3 @@ class ComputrabajoScraper(BaseScraper):
                 parts.append(text)
 
         return "\n".join(parts)[:DETAIL_MAX_CHARS]
-
-    def _dump_html(self, html: str, keyword: str, page: int) -> None:
-        """Guarda el HTML crudo en modo debug para revisar los selectores."""
-        safe_kw = keyword.replace(" ", "_")
-        filename = f"debug_computrabajo_{safe_kw}_p{page}.html"
-        with open(filename, "w", encoding="utf-8") as fh:
-            fh.write(html)
-        print(f"  [debug] HTML guardado en {filename}")

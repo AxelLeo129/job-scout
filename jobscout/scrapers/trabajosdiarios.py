@@ -1,57 +1,44 @@
 """Scraper de Trabajos Diarios.
 
-La búsqueda por palabra clave usa rutas tipo /ofertas-trabajo/de-<slug>. El
-sitio redirige al sinónimo canónico del puesto (p.ej. "de-desarrollador"
-acaba en "de-programador"), así que capturamos la URL final y paginamos sobre
-ella con ?page=N.
-
-Ojo: el parámetro GET ?key=... NO filtra (devuelve todo el listado); por eso
-usamos la ruta con slug.
+URL de búsqueda: ``https://<país>.trabajosdiarios.com/ofertas-trabajo/de-<slug>``.
+El sitio redirige al puesto canónico (``de-desarrollador`` ->
+``de-programador``), así que la paginación (``?page=N``) usa la URL final.
+El parámetro ``?key=`` no filtra resultados; por eso se usa la ruta con slug.
 """
 
 from __future__ import annotations
 
 import re
-import time
 from urllib.parse import quote, urljoin
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from ..models import JobOffer
-from .base import BaseScraper
+from .base import BaseScraper, find_salary
+
+_DATE_RE = re.compile(r"\d{2}/\d{2}/\d{4}")
 
 
 class TrabajosDiariosScraper(BaseScraper):
-    """Lee ofertas de <país>.trabajosdiarios.com."""
+    """Scraper de <país>.trabajosdiarios.com."""
 
     source_name = "trabajosdiarios"
-
-    def __init__(self, country: str = "gt", request_delay: float = 1.5, debug: bool = False):
-        super().__init__(request_delay=request_delay)
-        self.country = country
-        self.base_url = f"https://{country}.trabajosdiarios.com"
-        self.debug = debug
+    base_url_template = "https://{country}.trabajosdiarios.com"
 
     def search(self, keyword: str, max_pages: int) -> list[JobOffer]:
         offers: list[JobOffer] = []
-
         slug = quote(keyword.strip().lower().replace(" ", "-"))
         search_url = f"{self.base_url}/ofertas-trabajo/de-{slug}"
 
-        # Primera petición: puede redirigir al slug canónico. Guardamos la URL
-        # final para que la paginación no vuelva a pasar por la redirección.
         try:
-            time.sleep(self.request_delay)
-            response = self.session.get(search_url, timeout=20)
-            response.raise_for_status()
-        except Exception as exc:  # noqa: BLE001 - registramos y seguimos
-            print(f"  [trabajosdiarios] Error al leer {search_url}: {exc}")
+            response = self.request("GET", search_url)
+        except Exception as exc:  # noqa: BLE001 - una búsqueda caída no detiene la ejecución
+            self.log(f"Error al leer {search_url}: {exc}")
             return offers
 
-        # Si el sitio nos mandó al listado general (sin "/de-"), la palabra
-        # clave no existe como puesto y todo resultado sería ruido.
+        # Los puestos desconocidos redirigen al listado general (sin "/de-").
         if "/de-" not in response.url:
-            print(f"  [trabajosdiarios] Sin resultados para '{keyword}' (redirigió a {response.url})")
+            self.log(f"Sin resultados para '{keyword}' (redirigió a {response.url})")
             return offers
 
         canonical_url = response.url.split("?")[0]
@@ -63,14 +50,14 @@ class TrabajosDiariosScraper(BaseScraper):
                 try:
                     html = self.fetch(f"{canonical_url}?page={page}")
                 except Exception as exc:  # noqa: BLE001
-                    print(f"  [trabajosdiarios] Error al leer página {page}: {exc}")
+                    self.log(f"Error al leer la página {page}: {exc}")
                     break
 
             if self.debug:
-                self._dump_html(html, keyword, page)
+                self.dump_html(html, keyword, page)
 
-            page_offers = self._parse_results(html)
-            new_offers = [o for o in page_offers if o.url not in seen_urls]
+            # Las páginas después de la última repiten resultados en vez de venir vacías.
+            new_offers = [o for o in self._parse_results(html) if o.url not in seen_urls]
             if not new_offers:
                 break
             seen_urls.update(o.url for o in new_offers)
@@ -80,57 +67,34 @@ class TrabajosDiariosScraper(BaseScraper):
 
     def _parse_results(self, html: str) -> list[JobOffer]:
         soup = BeautifulSoup(html, "html.parser")
-        offers: list[JobOffer] = []
+        cards = soup.select("a[data-enlace-oferta][href*='/trabajo/']")
+        return [offer for card in cards if (offer := self._parse_card(card))]
 
-        # Cada oferta es un <a data-enlace-oferta href="/trabajo/<id>/<slug>">.
-        for card in soup.select("a[data-enlace-oferta][href*='/trabajo/']"):
-            offer = self._parse_card(card)
-            if offer is not None:
-                offers.append(offer)
-
-        return offers
-
-    def _parse_card(self, card) -> JobOffer | None:
+    def _parse_card(self, card: Tag) -> JobOffer | None:
+        """Construye un JobOffer a partir de una tarjeta (la tarjeta es el propio ``<a>``)."""
         title_el = card.select_one("h3")
         if title_el is None or not card.get("href"):
             return None
 
-        title = title_el.get_text(strip=True)
-        url = urljoin(self.base_url, card["href"])
-
         company_el = card.select_one("p.text-secondary")
-        company = company_el.get_text(strip=True) if company_el else "—"
-
-        # Ubicación: el <span> junto al icono de mapa, en la fila de metadatos.
-        location = "—"
-        for span in card.select(".row span.text-dark"):
-            text = span.get_text(strip=True)
-            # Descartamos la fecha (dd/mm/aaaa); lo demás es la ubicación.
-            if not re.fullmatch(r"\d{2}/\d{2}/\d{4}", text):
-                location = text
-                break
-
         desc_el = card.select_one("p.fw-lighter")
-        description = desc_el.get_text(" ", strip=True) if desc_el else ""
 
-        # Salario: si aparece, viene dentro del texto de la tarjeta.
-        text = card.get_text(" ", strip=True).replace("\xa0", " ")
-        match = re.search(r"(Q|\$)\s?[\d.,]+(\s?-\s?(Q|\$)?\s?[\d.,]+)?", text)
-        salary = match.group(0) if match else ""
-
-        return JobOffer(
-            title=title,
-            company=company,
-            location=location,
-            url=url,
-            source=self.source_name,
-            description=description,
-            salary=salary,
+        # La fila de metadatos trae la ubicación y la fecha de publicación.
+        location = next(
+            (
+                text
+                for span in card.select(".row span.text-dark")
+                if (text := span.get_text(strip=True)) and not _DATE_RE.fullmatch(text)
+            ),
+            "—",
         )
 
-    def _dump_html(self, html: str, keyword: str, page: int) -> None:
-        safe_kw = keyword.replace(" ", "_")
-        filename = f"debug_trabajosdiarios_{safe_kw}_p{page}.html"
-        with open(filename, "w", encoding="utf-8") as fh:
-            fh.write(html)
-        print(f"  [debug] HTML guardado en {filename}")
+        return JobOffer(
+            title=title_el.get_text(strip=True),
+            company=company_el.get_text(strip=True) if company_el else "—",
+            location=location,
+            url=urljoin(self.base_url, card["href"]),
+            source=self.source_name,
+            description=desc_el.get_text(" ", strip=True) if desc_el else "",
+            salary=find_salary(card.get_text(" ", strip=True)),
+        )

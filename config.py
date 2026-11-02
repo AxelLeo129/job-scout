@@ -1,11 +1,9 @@
-"""Configuración central de JobScout.
+"""Configuración de JobScout.
 
-Edita aquí tus criterios de búsqueda. Las claves secretas (API keys, tokens)
-van en el archivo .env, no aquí.
+Los secretos (API keys, tokens) van en el archivo .env, no aquí.
 """
 
-# Palabras clave a buscar. Cada una genera una búsqueda independiente.
-# Se usan tal cual aparecen en los portales de empleo.
+# Cada palabra clave es una búsqueda independiente en cada portal, tal cual.
 SEARCH_KEYWORDS = [
     "desarrollador de software",
     "desarrollador web",
@@ -15,13 +13,11 @@ SEARCH_KEYWORDS = [
     "programador",
 ]
 
-# País para todos los portales. "gt" = Guatemala.
-# Ojo: no todos los portales existen en todos los países (Computrabajo sí
-# tiene "mx", "co", "pe"...; Tecoloco solo Centroamérica, etc.).
+# Código de país para todos los portales ("gt" = Guatemala). No todos los
+# portales existen en todos los países (Tecoloco solo en Centroamérica, p.ej.).
 COUNTRY = "gt"
 
-# Portales activos. Cada nombre debe existir en SCRAPERS
-# (jobscout/scrapers/__init__.py). Comenta el que quieras desactivar.
+# Portales a consultar; cada nombre debe ser una clave de SCRAPERS (jobscout/scrapers/__init__.py).
 ENABLED_SCRAPERS = [
     "computrabajo",
     "tecoloco",
@@ -30,52 +26,47 @@ ENABLED_SCRAPERS = [
     # "acciontrabajo",  # bloqueado por el anti-bots de Cloudflare (403)
 ]
 
-# Cuántas páginas de resultados recorrer por palabra clave (≈20 ofertas por página).
+# Páginas de resultados por palabra clave (~20 ofertas por página).
 MAX_PAGES_PER_KEYWORD = 2
 
-# Exclusiones DURAS: si la empresa o el título (y la descripción, según
-# EXCLUDE_SEARCH_DESCRIPTION) de una oferta contiene alguno de estos términos (sin importar mayúsculas/acentos), la
-# oferta se descarta antes del ranking (no se evalúa ni se notifica). Útil
-# para vetar sectores o empresas que no te interesan.
+# Se descartan antes del ranking las ofertas cuya empresa o título (y la
+# descripción, ver abajo) contienen alguno de estos términos. Ignora
+# mayúsculas y acentos.
 EXCLUDE_TERMS = [
     "banca",
     "banco",
-    "bancari",  # cubre "bancario", "bancaria"
+    "bancari",  # cubre "bancario" / "bancaria"
     "genesis empresarial",
 ]
 
-# ¿Buscar también los EXCLUDE_TERMS en la descripción? True descarta, p.ej.,
-# una oferta de una empresa de software que pide "experiencia en banca
-# deseable". False solo mira empresa y título.
+# Buscar también los EXCLUDE_TERMS en la descripción. Con True se descartan
+# ofertas que solo mencionan un término de pasada ("experiencia en banca deseable").
 EXCLUDE_SEARCH_DESCRIPTION = False
 
-# Modalidades a PRIORIZAR en el ranking: la IA les sube el puntaje. No
-# descarta las demás (presenciales), solo favorece estas.
+# Modalidades que el ranking debe favorecer. Las demás puntúan más bajo, no se descartan.
 PREFERRED_MODALITIES = [
     "remoto",
     "híbrido",
 ]
 
-# Puntaje mínimo (0-100) para que una oferta se notifique por Telegram.
-# Subir este número = menos ofertas pero más relevantes.
+# Puntaje mínimo (0-100) para enviar una oferta por Telegram.
 MIN_SCORE_TO_NOTIFY = 60
 
-# Si un portal devuelve 0 ofertas en esta cantidad de ejecuciones seguidas,
-# se avisa por Telegram (suele ser un cambio de HTML o un bloqueo). Mientras
-# siga vacío, el aviso se repite cada 7 ejecuciones. 0 = desactivado.
+# Avisar por Telegram cuando un portal devuelve 0 ofertas en esta cantidad de
+# ejecuciones seguidas (suele ser un cambio de HTML o un bloqueo). 0 lo desactiva.
 PORTAL_ALERT_AFTER_EMPTY_RUNS = 3
 
-# Modelo de Claude usado para el ranking. Haiku es barato y rápido.
+# Modelo de Claude usado para el ranking.
 RANKING_MODEL = "claude-haiku-4-5"
 
-# Ruta al CV en texto plano (usado por la IA para puntuar).
+# CV en texto plano que lee el ranking.
 CV_PATH = "cv.txt"
 
-# Base SQLite donde se guardan las ofertas ya vistas (para no repetir).
+# Base SQLite con las ofertas procesadas y las ofertas por portal en cada ejecución.
 SEEN_DB_PATH = "seen_offers.db"
 
-# Archivo antiguo de huellas; si existe, se migra a la base y se renombra.
+# Archivo de huellas anterior a SQLite; si existe, se migra a SEEN_DB_PATH.
 LEGACY_SEEN_JSON_PATH = "seen_offers.json"
 
-# Pausa (segundos) entre peticiones HTTP, para ser respetuosos con los portales.
+# Pausa (segundos) entre peticiones HTTP a los portales.
 REQUEST_DELAY_SECONDS = 1.5
